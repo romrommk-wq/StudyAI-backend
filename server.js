@@ -32,26 +32,47 @@ app.post("/api/chat", async (req, res) => {
     ].filter(Boolean).join(" ");
 
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`;
-
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-goog-api-key": GEMINI_API_KEY,
+    const requestBody = JSON.stringify({
+      systemInstruction: {
+        parts: [{ text: contextNote ? `${system}\n\n${contextNote}` : system }],
       },
-      body: JSON.stringify({
-        systemInstruction: {
-          parts: [{ text: contextNote ? `${system}\n\n${contextNote}` : system }],
-        },
-        contents: [{ role: "user", parts: [{ text: message }] }],
-      }),
+      contents: [{ role: "user", parts: [{ text: message }] }],
     });
 
-    const data = await response.json();
+    // Gemini sometimes returns a temporary 503 "model overloaded" error.
+    // Retry a few times with increasing delay before giving up.
+    const MAX_ATTEMPTS = 3;
+    let response, data;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": GEMINI_API_KEY,
+        },
+        body: requestBody,
+      });
+      data = await response.json();
+
+      if (response.ok) break; // success, stop retrying
+
+      const isOverloaded = data?.error?.code === 503 || data?.error?.status === "UNAVAILABLE";
+      console.error(`Gemini API error (attempt ${attempt}/${MAX_ATTEMPTS}):`, data);
+
+      if (isOverloaded && attempt < MAX_ATTEMPTS) {
+        const delayMs = attempt * 1000; // 1s, then 2s
+        await new Promise((r) => setTimeout(r, delayMs));
+        continue;
+      }
+      break; // non-retryable error, or out of attempts
+    }
 
     if (!response.ok) {
-      console.error("Gemini API error:", data);
-      return res.status(502).json({ reply: "AI backend se error aaya. Server logs check karo." });
+      const isOverloaded = data?.error?.code === 503 || data?.error?.status === "UNAVAILABLE";
+      const msg = isOverloaded
+        ? "AI abhi busy hai (high demand). Thodi der ruk ke phir try karo."
+        : "AI backend se error aaya. Server logs check karo.";
+      return res.status(502).json({ reply: msg });
     }
 
     const reply =
