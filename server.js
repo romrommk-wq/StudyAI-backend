@@ -10,7 +10,8 @@ app.use(cors());              // allow your website (any origin) to call this se
 app.use(express.json());
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY; // set this in your host's environment variables — NEVER in code
-const MODEL = "gemini-flash-latest";
+// Try these models in order — if one is overloaded, fall back to the next.
+const MODELS = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-flash-latest"];
 
 app.post("/api/chat", async (req, res) => {
   try {
@@ -31,7 +32,6 @@ app.post("/api/chat", async (req, res) => {
       screenContext ? `They are currently on this app screen: ${screenContext}.` : null,
     ].filter(Boolean).join(" ");
 
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`;
     const requestBody = JSON.stringify({
       systemInstruction: {
         parts: [{ text: contextNote ? `${system}\n\n${contextNote}` : system }],
@@ -40,31 +40,37 @@ app.post("/api/chat", async (req, res) => {
     });
 
     // Gemini sometimes returns a temporary 503 "model overloaded" error.
-    // Retry a few times with increasing delay before giving up.
-    const MAX_ATTEMPTS = 3;
+    // Try each model in MODELS, with a couple of quick retries per model,
+    // before falling back to the next model. This means a viewer almost
+    // never sees a "busy" error — we quietly try other models behind the scenes.
+    const ATTEMPTS_PER_MODEL = 2;
     let response, data;
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      response = await fetch(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-goog-api-key": GEMINI_API_KEY,
-        },
-        body: requestBody,
-      });
-      data = await response.json();
+    outer:
+    for (const model of MODELS) {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+      for (let attempt = 1; attempt <= ATTEMPTS_PER_MODEL; attempt++) {
+        response = await fetch(url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-goog-api-key": GEMINI_API_KEY,
+          },
+          body: requestBody,
+        });
+        data = await response.json();
 
-      if (response.ok) break; // success, stop retrying
+        if (response.ok) break outer; // success, stop everything
 
-      const isOverloaded = data?.error?.code === 503 || data?.error?.status === "UNAVAILABLE";
-      console.error(`Gemini API error (attempt ${attempt}/${MAX_ATTEMPTS}):`, data);
+        const isOverloaded = data?.error?.code === 503 || data?.error?.status === "UNAVAILABLE";
+        console.error(`Gemini API error [${model}] (attempt ${attempt}/${ATTEMPTS_PER_MODEL}):`, data);
 
-      if (isOverloaded && attempt < MAX_ATTEMPTS) {
-        const delayMs = attempt * 1000; // 1s, then 2s
-        await new Promise((r) => setTimeout(r, delayMs));
-        continue;
+        if (!isOverloaded) break outer; // real error (bad key, bad request) — no point retrying
+
+        if (attempt < ATTEMPTS_PER_MODEL) {
+          await new Promise((r) => setTimeout(r, 700)); // brief pause, then retry same model
+        }
+        // else: fall through to try the next model in MODELS
       }
-      break; // non-retryable error, or out of attempts
     }
 
     if (!response.ok) {
@@ -90,3 +96,4 @@ app.get("/", (_req, res) => res.send("StudyAI backend is running ✅"));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`StudyAI backend listening on port ${PORT}`));
+                
