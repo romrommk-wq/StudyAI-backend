@@ -10,8 +10,36 @@ app.use(cors());              // allow your website (any origin) to call this se
 app.use(express.json());
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY; // set this in your host's environment variables — NEVER in code
-// Try these models in order — if one is overloaded, fall back to the next.
-const MODELS = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-flash-latest"];
+const GROQ_API_KEY = process.env.GROQ_API_KEY; // optional — used as a free backup if Gemini is busy
+// Try these Gemini models in order — if one is overloaded, fall back to the next.
+const MODELS = ["gemini-2.5-flash", "gemini-flash-latest", "gemini-2.5-pro"];
+const GROQ_MODEL = "openai/gpt-oss-120b";
+
+// --- Groq fallback: only used if every Gemini attempt fails ---
+async function askGroq(system, contextNote, message) {
+  if (!GROQ_API_KEY) return null; // not configured, skip
+  const fullSystem = contextNote ? `${system}\n\n${contextNote}` : system;
+  const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${GROQ_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: GROQ_MODEL,
+      messages: [
+        { role: "system", content: fullSystem },
+        { role: "user", content: message },
+      ],
+    }),
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    console.error("Groq API error:", data);
+    return null;
+  }
+  return data?.choices?.[0]?.message?.content || null;
+}
 
 app.post("/api/chat", async (req, res) => {
   try {
@@ -62,8 +90,10 @@ app.post("/api/chat", async (req, res) => {
         if (response.ok) break outer; // success, stop everything
 
         const isOverloaded = data?.error?.code === 503 || data?.error?.status === "UNAVAILABLE";
+        const isNotFound = data?.error?.code === 404 || data?.error?.status === "NOT_FOUND";
         console.error(`Gemini API error [${model}] (attempt ${attempt}/${ATTEMPTS_PER_MODEL}):`, data);
 
+        if (isNotFound) break; // this model no longer exists — skip straight to next model
         if (!isOverloaded) break outer; // real error (bad key, bad request) — no point retrying
 
         if (attempt < ATTEMPTS_PER_MODEL) {
@@ -74,6 +104,11 @@ app.post("/api/chat", async (req, res) => {
     }
 
     if (!response.ok) {
+      // Every Gemini attempt failed — try Groq (free backup) before giving up.
+      const groqReply = await askGroq(system, contextNote, message);
+      if (groqReply) {
+        return res.json({ reply: groqReply });
+      }
       const isOverloaded = data?.error?.code === 503 || data?.error?.status === "UNAVAILABLE";
       const msg = isOverloaded
         ? "AI abhi busy hai (high demand). Thodi der ruk ke phir try karo."
@@ -96,4 +131,4 @@ app.get("/", (_req, res) => res.send("StudyAI backend is running ✅"));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`StudyAI backend listening on port ${PORT}`));
-                
+  
